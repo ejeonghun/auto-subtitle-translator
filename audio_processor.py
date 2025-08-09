@@ -27,7 +27,7 @@ from device_utils import get_optimal_device, get_onnx_providers
 class AudioProcessor:
     """오디오/비디오 파일 처리 및 보컬 분리 클래스"""
     
-    def __init__(self, models_dir: str = "models", device: str = "auto"):
+    def __init__(self, models_dir: str = "models", device: str = "auto", progress_callback: Optional[callable] = None):
         """
         초기화 함수
         
@@ -77,6 +77,7 @@ class AudioProcessor:
         
         self.session = None
         self.ffmpeg_path = None
+        self.progress_callback = progress_callback
         
         # ffmpeg 사용 가능 여부 확인 및 자동 설치
         self._setup_ffmpeg()
@@ -138,6 +139,11 @@ class AudioProcessor:
                         if chunk:
                             temp_file.write(chunk)
                             pbar.update(len(chunk))
+                            if self.progress_callback and total_size:
+                                try:
+                                    self.progress_callback("ffmpeg_download", min(100.0, (pbar.n / total_size) * 100.0))
+                                except Exception:
+                                    pass
             
             print("📦 ffmpeg 압축 해제 중...")
             
@@ -166,6 +172,11 @@ class AudioProcessor:
                 
                 self.ffmpeg_path = str(final_ffmpeg_path)
                 print(f"✅ ffmpeg 설치 완료: {self.ffmpeg_path}")
+                if self.progress_callback:
+                    try:
+                        self.progress_callback("ffmpeg_download", 100.0)
+                    except Exception:
+                        pass
                 
                 # 임시 파일 정리
                 os.unlink(temp_path)
@@ -284,8 +295,18 @@ class AudioProcessor:
                         if chunk:
                             file.write(chunk)
                             pbar.update(len(chunk))
+                            if self.progress_callback and total_size:
+                                try:
+                                    self.progress_callback("uvr_model_download", min(100.0, (pbar.n / total_size) * 100.0))
+                                except Exception:
+                                    pass
             
             print(f"✅ 모델 다운로드 완료: {model_path}")
+            if self.progress_callback:
+                try:
+                    self.progress_callback("uvr_model_download", 100.0)
+                except Exception:
+                    pass
             return True
             
         except Exception as e:
@@ -555,6 +576,14 @@ class AudioProcessor:
                     
                     channel_vocals.append(vocal_chunk)
                     channel_instruments.append(instrument_chunk)
+
+                    # 진행률 보고 (한 채널 기준으로만 보고)
+                    if self.progress_callback and channel == 0:
+                        try:
+                            pct = max(0.0, min(100.0, (end_t / float(time_frames)) * 100.0))
+                            self.progress_callback("uvr_separate", pct)
+                        except Exception:
+                            pass
                 
                 # 청크들을 시간 축으로 연결
                 full_vocal_stft = np.concatenate(channel_vocals, axis=1)
@@ -603,6 +632,11 @@ class AudioProcessor:
                 instruments = np.pad(instruments, ((0, 0), (0, pad_length)), mode='constant')
             
             print("✅ 보컬 분리 완료")
+            if self.progress_callback:
+                try:
+                    self.progress_callback("uvr_separate", 100.0)
+                except Exception:
+                    pass
             return vocals, instruments
             
         except Exception as e:
@@ -708,6 +742,15 @@ class AudioProcessor:
         except Exception as e:
             print(f"❌ 파일 처리 실패: {e}")
             return None
+
+    def close(self):
+        """ONNX 세션 등 리소스를 정리합니다."""
+        try:
+            if getattr(self, "session", None) is not None:
+                # onnxruntime.InferenceSession는 명시적 close가 없어 참조만 해제
+                self.session = None
+        except Exception:
+            pass
 
 def main():
     """테스트용 메인 함수"""

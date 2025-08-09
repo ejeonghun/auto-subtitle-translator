@@ -4,12 +4,12 @@ faster-whisper>=1.0.0
 torch>=2.1.0
 torchaudio>=2.1.0
 transformers>=4.35.0
+pyqt6>=6.6.0
 # fairseq2>=0.2.0  # Seamless M4T 사용시에만 별도 설치
 
 # 오디오 처리 라이브러리
 librosa>=0.10.0
 soundfile>=0.12.0
-# moviepy 제거 - ffmpeg 직접 사용으로 대체
 
 # 핵심 수치 연산 (버전 호환성 고려)
 numpy>=1.24.0,<2.0.0

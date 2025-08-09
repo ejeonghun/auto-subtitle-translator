@@ -13,7 +13,7 @@ from pathlib import Path
 # 모듈 import
 from audio_processor import AudioProcessor
 from speech_to_text import SpeechToText
-from translator import Translator
+from translator import Translator, SubtitleTranslator
 from device_utils import print_device_summary
 
 def main():
@@ -35,6 +35,9 @@ def main():
                        help="보컬 분리 건너뛰기 (원본 오디오 사용)")
     parser.add_argument("--download-models", action="store_true", 
                        help="모델만 다운로드하고 종료")
+    parser.add_argument("--program-name", default=None, help="프로그램 이름 (번역 품질 향상용 프롬프트)"
+                       )
+    parser.add_argument("--program-notes", default=None, help="부연설명/도움 설명 (번역 가이드 프롬프트)")
     
     args = parser.parse_args()
     
@@ -51,7 +54,9 @@ def main():
         speech_to_text = SpeechToText(
             engine=args.engine,
             model_size=args.model,
-            device=args.device
+            device=args.device,
+            progress_callback=None,
+            segment_callback=None
         )
         print("✅ 음성 인식기 초기화 완료")
         
@@ -134,7 +139,20 @@ def main():
         print("="*50)
         
         translated_srt_path = output_dir / f"{input_path.stem}_translated_{args.language.lower()}.srt"
-        if not translator.translate_srt_file(str(original_srt_path), str(translated_srt_path), args.language):
+        # 내부 SubtitleTranslator를 생성하여 컨텍스트 전달
+        try:
+            subtitle_translator = SubtitleTranslator(
+                api_key=args.api_key,
+                target_language=args.language,
+                batch_size=100,
+                program_name=args.program_name,
+                additional_context=args.program_notes
+            )
+            ok = subtitle_translator.translate_srt_file(str(original_srt_path), str(translated_srt_path), args.program_name)
+        except Exception:
+            ok = translator.translate_srt_file(str(original_srt_path), str(translated_srt_path), args.language)
+
+        if not ok:
             print("❌ 자막 번역 실패")
             return
         

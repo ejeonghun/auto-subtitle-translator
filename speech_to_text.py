@@ -48,7 +48,10 @@ class SpeechToText:
                  engine: str = "faster_whisper",
                  model_size: str = "large-v3",
                  device: str = "auto",
-                 models_dir: str = "models"):
+                 models_dir: str = "models",
+                  progress_callback: Optional[Any] = None,
+                  segment_callback: Optional[Any] = None,
+                  log_callback: Optional[Any] = None):
         """
         초기화 함수
         
@@ -74,8 +77,22 @@ class SpeechToText:
         
         self.model = None
         self.processor = None
+        # UI 연동용 콜백
+        self.progress_callback = progress_callback  # 다운로드/로드/추론 진행률 보고
+        self.segment_callback = segment_callback    # 실시간 세그먼트 보고
+        self.log_callback = log_callback            # 상세 로그 보고
         
         print(f"🎙️ SpeechToText 초기화 - 엔진: {engine}, 모델: {model_size}, 디바이스: {self.device_type.upper()}")
+
+    def _log(self, message: str):
+        if self.log_callback:
+            try:
+                self.log_callback(message)
+                return
+            except Exception:
+                pass
+        # fallback
+        print(message)
     
     def download_whisper_model(self) -> bool:
         """
@@ -89,7 +106,7 @@ class SpeechToText:
             return False
         
         try:
-            print(f"📥 Whisper 모델 다운로드 중: {self.model_size}")
+            self._log(f"📥 Whisper 모델 다운로드 시작: {self.model_size}")
             
             # 모델 다운로드 및 캐시
             model = WhisperModel(
@@ -98,12 +115,14 @@ class SpeechToText:
                 compute_type="float16" if self.device == "cuda" else "int8",
                 download_root=str(self.models_dir / "whisper")
             )
+            if self.progress_callback:
+                self.progress_callback("whisper_download", 100)
             
-            print(f"✅ Whisper 모델 다운로드 완료: {self.model_size}")
+            self._log(f"✅ Whisper 모델 다운로드 완료: {self.model_size}")
             return True
             
         except Exception as e:
-            print(f"❌ Whisper 모델 다운로드 실패: {e}")
+            self._log(f"❌ Whisper 모델 다운로드 실패: {e}")
             return False
     
     def download_seamless_model(self) -> bool:
@@ -118,7 +137,7 @@ class SpeechToText:
             return False
         
         try:
-            print("📥 Seamless M4T 모델 다운로드 중...")
+            self._log("📥 Seamless M4T 모델 다운로드 시작…")
             
             # 모델과 프로세서 다운로드
             cache_dir = str(self.models_dir / "seamless")
@@ -133,11 +152,11 @@ class SpeechToText:
                 cache_dir=cache_dir
             )
             
-            print("✅ Seamless M4T 모델 다운로드 완료")
+            self._log("✅ Seamless M4T 모델 다운로드 완료")
             return True
             
         except Exception as e:
-            print(f"❌ Seamless M4T 모델 다운로드 실패: {e}")
+            self._log(f"❌ Seamless M4T 모델 다운로드 실패: {e}")
             return False
     
     def load_whisper_model(self) -> bool:
@@ -152,7 +171,7 @@ class SpeechToText:
             return False
         
         try:
-            print(f"🔄 Whisper 모델 로드 중: {self.model_size}")
+            self._log(f"🔄 Whisper 모델 로드 중: {self.model_size}")
             
             # 디바이스별 설정 가져오기
             whisper_config = get_whisper_device_config(self.device_type)
@@ -163,12 +182,14 @@ class SpeechToText:
                 compute_type=whisper_config["compute_type"],
                 download_root=str(self.models_dir / "whisper")
             )
+            if self.progress_callback:
+                self.progress_callback("whisper_load", 100)
             
-            print(f"✅ Whisper 모델 로드 완료 ({self.device_type.upper()})")
+            self._log(f"✅ Whisper 모델 로드 완료 ({self.device_type.upper()})")
             return True
             
         except Exception as e:
-            print(f"❌ Whisper 모델 로드 실패: {e}")
+            self._log(f"❌ Whisper 모델 로드 실패: {e}")
             return False
     
     def load_seamless_model(self) -> bool:
@@ -183,7 +204,7 @@ class SpeechToText:
             return False
         
         try:
-            print("🔄 Seamless M4T 모델 로드 중...")
+            self._log("🔄 Seamless M4T 모델 로드 중…")
             
             cache_dir = str(self.models_dir / "seamless")
             
@@ -201,13 +222,13 @@ class SpeechToText:
             torch_device = get_torch_device(self.device_type)
             if torch_device != "cpu":
                 self.model = self.model.to(torch_device)
-                print(f"✅ Seamless M4T 모델을 {torch_device.upper()}로 이동")
+                self._log(f"✅ Seamless M4T 모델을 {torch_device.upper()}로 이동")
             
-            print(f"✅ Seamless M4T 모델 로드 완료 ({self.device_type.upper()})")
+            self._log(f"✅ Seamless M4T 모델 로드 완료 ({self.device_type.upper()})")
             return True
             
         except Exception as e:
-            print(f"❌ Seamless M4T 모델 로드 실패: {e}")
+            self._log(f"❌ Seamless M4T 모델 로드 실패: {e}")
             return False
     
     def transcribe_with_whisper(self, audio_path: str, language: str = None) -> List[TranscriptionSegment]:
@@ -241,6 +262,7 @@ class SpeechToText:
             )
             
             print(f"🌍 감지된 언어: {info.language} (확률: {info.language_probability:.2f})")
+            total_duration = getattr(info, "duration", None)
             
             # 결과 변환
             results = []
@@ -251,8 +273,30 @@ class SpeechToText:
                     text=segment.text.strip(),
                     confidence=segment.avg_logprob
                 ))
+                # 진행률 보고 (가능한 경우)
+                if self.progress_callback and total_duration and total_duration > 0:
+                    try:
+                        pct = max(0.0, min(100.0, (segment.end / total_duration) * 100.0))
+                        self.progress_callback("whisper_transcribe", pct)
+                    except Exception:
+                        pass
+                if self.segment_callback:
+                    try:
+                        self.segment_callback({
+                            "start": segment.start,
+                            "end": segment.end,
+                            "text": segment.text.strip(),
+                            "confidence": segment.avg_logprob
+                        })
+                    except Exception:
+                        pass
             
             print(f"✅ Whisper 음성 인식 완료: {len(results)}개 세그먼트")
+            if self.progress_callback:
+                try:
+                    self.progress_callback("whisper_transcribe", 100.0)
+                except Exception:
+                    pass
             return results
             
         except Exception as e:
@@ -463,6 +507,31 @@ class SpeechToText:
         except Exception as e:
             print(f"❌ 음성-텍스트 변환 실패: {e}")
             return False
+
+    def close(self):
+        """로드된 모델/프로세서를 해제하고 디바이스 캐시를 정리합니다."""
+        try:
+            # 모델/프로세서 참조 해제
+            if getattr(self, "model", None) is not None:
+                self.model = None
+            if getattr(self, "processor", None) is not None:
+                self.processor = None
+
+            # 디바이스 캐시 정리 (가능한 경우)
+            if 'torch' in globals() and torch is not None:
+                try:
+                    torch_device = get_torch_device(self.device_type)
+                    if torch_device == "cuda" and hasattr(torch, "cuda") and torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                    if torch_device == "mps" and hasattr(torch, "mps") and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                        try:
+                            torch.mps.empty_cache()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
 def main():
     """테스트용 메인 함수"""

@@ -34,7 +34,7 @@ class SubtitleEntry:
 class SRTTranslator:
     """SRT 파일을 Gemini API로 번역하는 클래스"""
 
-    def __init__(self, api_key: str, target_language: str = "Korean", batch_size: int = 50):
+    def __init__(self, api_key: str, target_language: str = "Korean", batch_size: int = 100, program_name: Optional[str] = None, additional_context: Optional[str] = None):
         """
         초기화 함수
 
@@ -47,6 +47,8 @@ class SRTTranslator:
         # self.api_key = "AIzaSyBHmyFhjNDRitiC7CMHg-OTVJdzRmxe9tw"
         self.target_language = target_language
         self.batch_size = batch_size
+        self.program_name = program_name
+        self.additional_context = additional_context
 
         # Gemini API 설정
         try:
@@ -118,7 +120,7 @@ class SRTTranslator:
 
         return subtitles
 
-    def create_translation_prompt(self, subtitles_batch: List[SubtitleEntry], program_name: str = None) -> str:
+    def create_translation_prompt(self, subtitles_batch: List[SubtitleEntry], program_name: Optional[str] = None, additional_context: Optional[str] = None) -> str:
         """
         번역을 위한 프롬프트 생성
 
@@ -136,24 +138,26 @@ class SRTTranslator:
 
         subtitle_text = "\n".join(numbered_subtitles)
 
-        program_info = f"방송 프로그램: {program_name}\n" if program_name else "방송 프로그램: 자동으로 Gemini가 찾아서 어떠한 프로그램인지를 알아주세요\n"
+        program_info = f"방송 프로그램: {program_name}\n" if program_name else "방송 프로그램: (불명확할 경우 맥락으로 추정)\n"
+        extra_context = f"부연설명: {additional_context}\n" if additional_context else "부연설명: (없음)\n"
 
         prompt = f"""
-{program_info}내용: 자동으로 Gemini가 찾아서 어떠한 프로그램인지를 알아주세요
-프롬프트: "{self.target_language}"으로 자연스럽게 번역 해 주세요.
+역할: 당신은 방송/영상 콘텐츠 자막 전문 번역가입니다. 의미 보존과 자연스러움, 시청 흐름을 최우선으로 합니다.
+{program_info}{extra_context}
+대상 언어: {self.target_language}
 
-자막:
+자막(번호. 텍스트):
 {subtitle_text}
 
-번역 규칙:
-1. 각 번호에 해당하는 자막을 "{self.target_language}"으로 번역해주세요.
-2. 번역 결과는 "번호. 번역된 내용" 형식으로 제공해주세요.
-3. 자막의 맥락과 뉘앙스를 고려하여 자연스럽게 번역해주세요.
-4. 고유명사나 전문용어는 적절히 현지화해주세요.
-5. 숫자 순서는 반드시 유지해주세요.
-6. 번역이 불가능한 경우 원문을 그대로 유지해주세요.
+요청 사항:
+1) 각 번호에 해당하는 자막을 자연스럽게 {self.target_language}로 번역하세요.
+2) 각 자막은 독립적으로 번역하되, 한 줄에 표시되기 적합한 길이로 유지하세요 (최대 2-3개 단어나 짧은 구문).
+3) 존칭/구어체/일상 회화의 톤은 맥락에 맞게 유지하세요.
+4) 고유명사/전문용어는 현지화하되 의미 손실이 없도록 주의하세요.
+5) 출력 형식은 반드시 "번호. 번역문"으로 하세요.
+6) 자막이 너무 길어지지 않도록 간결하게 번역하세요. 노래 가사의 경우 각 행의 독립성을 유지하세요.
 
-번역 결과:
+출력:
 """
 
         return prompt
@@ -202,6 +206,56 @@ class SRTTranslator:
 
         return translated_subtitles
 
+    def merge_adjacent_subtitles(self, subtitles: List[SubtitleEntry], max_gap_seconds: float = 0.4) -> List[SubtitleEntry]:
+        """
+        인접 자막을 시간 간격이 짧고 문장적으로 이어질 때 병합합니다.
+
+        병합 휴리스틱:
+        - 두 자막의 시작-끝 간격이 max_gap_seconds 이하
+        - 앞 자막이 강한 종결부호로 끝나지 않음 (., !, ?, …, ~, ♪ 등)
+
+        Returns:
+            병합된 자막 리스트
+        """
+        if not subtitles:
+            return []
+
+        def parse_time(ts: str) -> float:
+            h, m, rest = ts.split(':')
+            s, ms = rest.split(',')
+            return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000.0
+
+        merged: List[SubtitleEntry] = []
+        buffer = subtitles[0]
+        end_punctuations = set(['.', '!', '?', '…', '~', '♪', '"', '\''])
+
+        for cur in subtitles[1:]:
+            prev_end = parse_time(buffer.end_time)
+            cur_start = parse_time(cur.start_time)
+            gap = max(cur_start - prev_end, 0.0)
+
+            prev_text = buffer.text.strip()
+            ends_with_terminal = len(prev_text) > 0 and prev_text[-1] in end_punctuations
+
+            if gap <= max_gap_seconds and not ends_with_terminal:
+                # 병합
+                combined_text = (prev_text + ' ' + cur.text.strip()).strip()
+                buffer = SubtitleEntry(
+                    index=buffer.index,
+                    start_time=buffer.start_time,
+                    end_time=cur.end_time,
+                    text=combined_text
+                )
+            else:
+                merged.append(buffer)
+                buffer = cur
+
+        merged.append(buffer)
+        # 인덱스를 1..N 재부여 (SRT 규격)
+        for i, sub in enumerate(merged, start=1):
+            sub.index = i
+        return merged
+
     def translate_subtitles(self, subtitles: List[SubtitleEntry], program_name: str = None) -> List[SubtitleEntry]:
         """
         자막 리스트를 배치 단위로 번역
@@ -213,6 +267,9 @@ class SRTTranslator:
         Returns:
             번역된 자막 리스트
         """
+        # 0) 번역 전 병합
+        subtitles = self.merge_adjacent_subtitles(subtitles)
+
         translated_subtitles = []
         total_batches = (len(subtitles) + self.batch_size - 1) // self.batch_size
 
@@ -235,7 +292,7 @@ class SRTTranslator:
             while retry_count < max_retries:
                 try:
                     # 번역 프롬프트 생성
-                    prompt = self.create_translation_prompt(batch, program_name)
+                    prompt = self.create_translation_prompt(batch, program_name or self.program_name, self.additional_context)
 
                     # 토큰 수 체크 (대략적)
                     token_estimate = len(prompt.split())

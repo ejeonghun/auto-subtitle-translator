@@ -33,7 +33,7 @@ class SubtitleEntry:
 class SubtitleTranslator:
     """SRT 파일을 Gemini API로 번역하는 클래스"""
 
-    def __init__(self, api_key: str, target_language: str = "Korean", batch_size: int = 50):
+    def __init__(self, api_key: str, target_language: str = "Korean", batch_size: int = 100, program_name: Optional[str] = None, additional_context: Optional[str] = None):
         """
         초기화 함수
 
@@ -48,11 +48,13 @@ class SubtitleTranslator:
         self.api_key = api_key
         self.target_language = target_language
         self.batch_size = batch_size
+        self.program_name = program_name
+        self.additional_context = additional_context
 
         # Gemini API 설정
         try:
             genai.configure(api_key=api_key)
-            self.model = genai.GenerativeModel('gemini-2.0-flash-exp')
+            self.model = genai.GenerativeModel('gemini-2.5-flash-lite')
             print("✅ Gemini API 연결 성공!")
         except Exception as e:
             print(f"❌ Gemini API 연결 실패: {e}")
@@ -120,7 +122,7 @@ class SubtitleTranslator:
 
         return subtitles
 
-    def create_translation_prompt(self, subtitles_batch: List[SubtitleEntry], program_name: str = None) -> str:
+    def create_translation_prompt(self, subtitles_batch: List[SubtitleEntry], program_name: Optional[str] = None, additional_context: Optional[str] = None) -> str:
         """
         번역을 위한 프롬프트 생성
 
@@ -138,24 +140,26 @@ class SubtitleTranslator:
 
         subtitle_text = "\n".join(numbered_subtitles)
 
-        program_info = f"방송 프로그램: {program_name}\n" if program_name else "방송 프로그램: 자동으로 Gemini가 찾아서 어떠한 프로그램인지를 알아주세요\n"
+        program_info = f"방송 프로그램: {program_name}\n" if program_name else "방송 프로그램: (불명확할 경우 맥락으로 추정)\n"
+        extra_context = f"부연설명: {additional_context}\n" if additional_context else "부연설명: (없음)\n"
 
         prompt = f"""
-{program_info}내용: 자동으로 Gemini가 찾아서 어떠한 프로그램인지를 알아주세요
-프롬프트: "{self.target_language}"으로 자연스럽게 번역 해 주세요.
+역할: 당신은 방송/영상 콘텐츠 자막 전문 번역가입니다. 의미 보존과 자연스러움, 시청 흐름을 최우선으로 합니다.
+{program_info}{extra_context}
+대상 언어: {self.target_language}
 
-자막:
+자막(번호. 텍스트):
 {subtitle_text}
 
-번역 규칙:
-1. 각 번호에 해당하는 자막을 "{self.target_language}"으로 번역해주세요.
-2. 번역 결과는 "번호. 번역된 내용" 형식으로 제공해주세요.
-3. 자막의 맥락과 뉘앙스를 고려하여 자연스럽게 번역해주세요.
-4. 고유명사나 전문용어는 적절히 현지화해주세요.
-5. 숫자 순서는 반드시 유지해주세요.
-6. 번역이 불가능한 경우 원문을 그대로 유지해주세요.
+요청 사항:
+1) 각 번호에 해당하는 자막을 자연스럽게 {self.target_language}로 번역하세요.
+2) 서로 연속된 두 자막의 타임스탬프 간격이 매우 짧고(대략 0.3~0.5초 이내) 문장 상 이어져야 자연스러운 경우, 두 자막을 하나의 문장으로 "자연스럽게" 붙여 번역하세요.
+3) 존칭/구어체/일상 회화의 톤은 맥락에 맞게 유지하세요.
+4) 고유명사/전문용어는 현지화하되 의미 손실이 없도록 주의하세요.
+5) 출력 형식은 반드시 "번호. 번역문"으로 하세요. 병합한 경우에도 첫 번째 번호만 사용하여 "번호. 번역문"으로 출력하세요.
+6) 판단이 애매하면 과도한 병합은 피하고 원문 흐름을 존중하세요.
 
-번역 결과:
+출력:
 """
 
         return prompt
@@ -204,7 +208,64 @@ class SubtitleTranslator:
 
         return translated_subtitles
 
-    def translate_subtitles(self, subtitles: List[SubtitleEntry], program_name: str = None) -> List[SubtitleEntry]:
+    def merge_adjacent_subtitles(self, subtitles: List[SubtitleEntry], max_gap_seconds: float = 0.4) -> List[SubtitleEntry]:
+        """
+        인접 자막을 시간 간격이 짧고 문장적으로 이어질 때 병합합니다.
+
+        병합 휴리스틱:
+        - 두 자막의 시작-끝 간격이 max_gap_seconds 이하
+        - 앞 자막이 강한 종결부호로 끝나지 않음 (., !, ?, …, ~, ♪ 등)
+
+        Returns:
+            병합된 자막 리스트
+        """
+        if not subtitles:
+            return []
+
+        def parse_time(ts: str) -> float:
+            h, m, rest = ts.split(':')
+            s, ms = rest.split(',')
+            return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000.0
+
+        def fmt_time(seconds: float) -> str:
+            h = int(seconds // 3600)
+            m = int((seconds % 3600) // 60)
+            s = int(seconds % 60)
+            ms = int((seconds % 1) * 1000)
+            return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+        merged: List[SubtitleEntry] = []
+        buffer = subtitles[0]
+        end_punctuations = set(['.', '!', '?', '…', '~', '♪', '"', '\''])
+
+        for cur in subtitles[1:]:
+            prev_end = parse_time(buffer.end_time)
+            cur_start = parse_time(cur.start_time)
+            gap = max(cur_start - prev_end, 0.0)
+
+            prev_text = buffer.text.strip()
+            ends_with_terminal = len(prev_text) > 0 and prev_text[-1] in end_punctuations
+
+            if gap <= max_gap_seconds and not ends_with_terminal:
+                # 병합
+                combined_text = (prev_text + ' ' + cur.text.strip()).strip()
+                buffer = SubtitleEntry(
+                    index=buffer.index,
+                    start_time=buffer.start_time,
+                    end_time=cur.end_time,
+                    text=combined_text
+                )
+            else:
+                merged.append(buffer)
+                buffer = cur
+
+        merged.append(buffer)
+        # 인덱스를 1..N 재부여 (SRT 규격)
+        for i, sub in enumerate(merged, start=1):
+            sub.index = i
+        return merged
+
+    def translate_subtitles(self, subtitles: List[SubtitleEntry], program_name: str = None, stream_callback: Optional[Any] = None) -> List[SubtitleEntry]:
         """
         자막 리스트를 배치 단위로 번역
 
@@ -215,6 +276,9 @@ class SubtitleTranslator:
         Returns:
             번역된 자막 리스트
         """
+        # 0) 번역 전 병합
+        subtitles = self.merge_adjacent_subtitles(subtitles)
+
         translated_subtitles = []
         total_batches = (len(subtitles) + self.batch_size - 1) // self.batch_size
 
@@ -237,21 +301,44 @@ class SubtitleTranslator:
             while retry_count < max_retries:
                 try:
                     # 번역 프롬프트 생성
-                    prompt = self.create_translation_prompt(batch, program_name)
+                    prompt = self.create_translation_prompt(
+                        batch,
+                        program_name or self.program_name,
+                        self.additional_context
+                    )
 
                     # 토큰 수 체크 (대략적)
                     token_estimate = len(prompt.split())
                     if token_estimate > 30000:  # Gemini의 토큰 제한 고려
                         print(f"⚠️ 토큰수가 많습니다 ({token_estimate}). 배치 크기를 줄이는 것을 권장합니다.")
 
-                    # Gemini API 호출
-                    response = self.model.generate_content(prompt)
+                    # Gemini API 호출 (스트리밍 지원)
+                    aggregated_text = ""
+                    try:
+                        response = self.model.generate_content(prompt, stream=True)
+                        for chunk in response:
+                            if hasattr(chunk, 'text') and chunk.text:
+                                aggregated_text += chunk.text
+                                if stream_callback:
+                                    try:
+                                        stream_callback(chunk.text)
+                                    except Exception:
+                                        pass
+                        # ensure complete
+                        try:
+                            response.resolve()
+                        except Exception:
+                            pass
+                    except TypeError:
+                        # 라이브러리 버전에 따라 stream 미지원 시 폴백
+                        response = self.model.generate_content(prompt)
+                        aggregated_text = response.text or ""
 
-                    if not response.text:
+                    if not aggregated_text.strip():
                         raise ValueError("빈 응답을 받았습니다.")
 
                     # 응답 파싱
-                    translated_batch = self.parse_translation_response(response.text, batch)
+                    translated_batch = self.parse_translation_response(aggregated_text, batch)
                     translated_subtitles.extend(translated_batch)
 
                     print(f"✅ 배치 {batch_num} 번역 완료!")
@@ -302,7 +389,7 @@ class SubtitleTranslator:
             print(f"❌ 파일 저장 오류: {e}")
             raise
 
-    def translate_srt_file(self, input_path: str, output_path: str, program_name: str = None) -> bool:
+    def translate_srt_file(self, input_path: str, output_path: str, program_name: str = None, stream_callback: Optional[Any] = None) -> bool:
         """
         SRT 파일을 번역하는 메인 함수
 
@@ -334,7 +421,7 @@ class SubtitleTranslator:
 
             # 자막 번역
             print("\n2️⃣ 자막 번역 중...")
-            translated_subtitles = self.translate_subtitles(subtitles, program_name)
+            translated_subtitles = self.translate_subtitles(subtitles, program_name, stream_callback)
 
             # 번역된 SRT 파일 저장
             print("\n3️⃣ 번역된 SRT 파일 저장 중...")
@@ -351,6 +438,14 @@ class SubtitleTranslator:
         except Exception as e:
             print(f"❌ 번역 중 오류 발생: {e}")
             return False
+
+    def close(self):
+        """API 클라이언트 레퍼런스를 정리합니다."""
+        try:
+            if hasattr(self, "model"):
+                self.model = None
+        except Exception:
+            pass
 
 # main.py와의 호환성을 위한 래퍼 클래스
 class Translator:
